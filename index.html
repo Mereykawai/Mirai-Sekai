@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Блоки</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;overflow:hidden;font-family:sans-serif}
+canvas{display:block}
+#ui{position:fixed;inset:0;pointer-events:none}
+
+/* Джойстик */
+#joy-zone{position:fixed;left:0;bottom:0;width:180px;height:180px;pointer-events:all}
+#joy-bg{position:absolute;left:20px;bottom:20px;width:120px;height:120px;
+  border-radius:50%;background:rgba(255,255,255,0.15);border:2px solid rgba(255,255,255,0.3)}
+#joy-dot{position:absolute;left:40px;bottom:40px;width:40px;height:40px;
+  border-radius:50%;background:rgba(255,255,255,0.5);transition:none}
+
+/* Камера (правая сторона) */
+#look-zone{position:fixed;right:0;bottom:0;width:calc(100% - 180px);height:60%;pointer-events:all}
+
+/* Кнопки действий */
+#btns{position:fixed;right:16px;bottom:200px;display:flex;flex-direction:column;gap:10px;pointer-events:all}
+.btn{width:60px;height:60px;border-radius:12px;background:rgba(255,255,255,0.2);
+  border:2px solid rgba(255,255,255,0.4);color:#fff;font-size:22px;
+  display:flex;align-items:center;justify-content:center;user-select:none;-webkit-user-select:none}
+
+/* Прыжок */
+#jump{position:fixed;right:90px;bottom:30px;width:65px;height:65px;border-radius:50%;
+  background:rgba(100,200,100,0.35);border:2px solid rgba(100,255,100,0.5);
+  color:#fff;font-size:24px;display:flex;align-items:center;justify-content:center;
+  pointer-events:all;user-select:none}
+
+/* Хотбар */
+#hotbar{position:fixed;bottom:0;left:50%;transform:translateX(-50%);
+  display:flex;gap:4px;padding:6px;pointer-events:all}
+.slot{width:48px;height:48px;border:2px solid #555;border-radius:6px;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  font-size:9px;color:#fff;cursor:pointer;user-select:none}
+.slot.active{border-color:#fff;background:rgba(255,255,255,0.15)}
+
+/* Прицел */
+#cross{position:fixed;left:50%;top:42%;width:20px;height:20px;margin:-10px;pointer-events:none}
+#cross:before,#cross:after{content:"";position:absolute;background:rgba(255,255,255,0.8)}
+#cross:before{left:9px;top:0;width:2px;height:20px}
+#cross:after{top:9px;left:0;height:2px;width:20px}
+
+#hint{position:fixed;top:10px;left:50%;transform:translateX(-50%);
+  background:rgba(0,0,0,0.5);color:#fff;padding:6px 12px;border-radius:8px;font-size:13px}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <div id="cross"></div>
+  <div id="hint">⛏ Тап — сломать &nbsp; 🧱 Долгий тап — поставить</div>
+  <div id="joy-zone">
+    <div id="joy-bg"></div>
+    <div id="joy-dot"></div>
+  </div>
+  <div id="look-zone"></div>
+  <div id="btns">
+    <div class="btn" id="break-btn">⛏</div>
+    <div class="btn" id="place-btn">🧱</div>
+  </div>
+  <div id="jump">↑</div>
+  <div id="hotbar"></div>
+</div>
+
+<script type="importmap">
+{"imports":{
+  "three":"https://unpkg.com/three@0.160.0/build/three.module.js"
+}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ---- Размер канваса ----
+const cv = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({canvas:cv, antialias:false});
+renderer.setPixelRatio(Math.min(devicePixelRatio,1.5));
+renderer.setSize(innerWidth, innerHeight);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87ceeb);
+scene.fog = new THREE.Fog(0x87ceeb, 20, 50);
+
+const camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, 0.1, 100);
+scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+const sun = new THREE.DirectionalLight(0xffffff, 0.6);
+sun.position.set(1,2,1); scene.add(sun);
+
+// ---- Мир ----
+const W=48, H=24, D=48;
+const world = new Uint8Array(W*H*D);
+const idx = (x,y,z) => x + z*W + y*W*D;
+const inb = (x,y,z) => x>=0&&x<W&&y>=0&&y<H&&z>=0&&z<D;
+function get(x,y,z){ return y<0?1 : !inb(x,y,z)?0 : world[idx(x,y,z)]; }
+function set(x,y,z,t){ if(inb(x,y,z)) world[idx(x,y,z)]=t; }
+
+const BLOCKS=[null,
+  {name:'Трава', c:[90,160,60]},
+  {name:'Земля', c:[130,90,55]},
+  {name:'Камень',c:[125,125,130]},
+  {name:'Дерево',c:[100,70,40]},
+  {name:'Листва',c:[50,130,50]},
+  {name:'Доски', c:[180,140,80]},
+];
+
+// Генерация мира
+const hmap=[];
+for(let x=0;x<W;x++){hmap[x]=[];
+  for(let z=0;z<D;z++){
+    const h=8+Math.round(Math.sin(x*0.18)*2+Math.cos(z*0.15)*2+Math.sin((x+z)*0.09)*2);
+    hmap[x][z]=h;
+    for(let y=0;y<=h;y++) set(x,y,z,y===h?1:y>=h-3?2:3);
+  }
+}
+// Деревья
+for(let i=0;i<25;i++){
+  const x=3+Math.floor(Math.random()*(W-6));
+  const z=3+Math.floor(Math.random()*(D-6));
+  const h=hmap[x][z];
+  for(let y=1;y<=4;y++) set(x,h+y,z,4);
+  for(let dx=-2;dx<=2;dx++) for(let dz=-2;dz<=2;dz++) for(let dy=3;dy<=5;dy++)
+    if(!get(x+dx,h+dy,z+dz)&&Math.abs(dx)+Math.abs(dz)<4) set(x+dx,h+dy,z+dz,5);
+}
+
+// ---- Текстуры и меши ----
+function makeTex(col){
+  const c=document.createElement('canvas'); c.width=c.height=16;
+  const g=c.getContext('2d');
+  for(let i=0;i<16;i++) for(let j=0;j<16;j++){
+    const d=(Math.random()-.5)*28;
+    g.fillStyle=`rgb(${col[0]+d|0},${col[1]+d|0},${col[2]+d|0})`;
+    g.fillRect(i,j,1,1);
+  }
+  const t=new THREE.CanvasTexture(c);
+  t.magFilter=t.minFilter=THREE.NearestFilter;
+  return t;
+}
+const mats=BLOCKS.map(b=>b&&new THREE.MeshLambertMaterial({map:makeTex(b.c)}));
+const geo=new THREE.BoxGeometry(1,1,1);
+const dummy=new THREE.Object3D();
+let meshes=[];
+
+function rebuild(){
+  meshes.forEach(m=>{scene.remove(m);m.geometry.dispose();});
+  meshes=[];
+  const lists=BLOCKS.map(()=>[]);
+  for(let x=0;x<W;x++) for(let y=0;y<H;y++) for(let z=0;z<D;z++){
+    const t=world[idx(x,y,z)]; if(!t) continue;
+    if(!get(x+1,y,z)||!get(x-1,y,z)||!get(x,y+1,z)||
+       !get(x,y-1,z)||!get(x,y,z+1)||!get(x,y,z-1))
+      lists[t].push(x,y,z);
+  }
+  for(let t=1;t<BLOCKS.length;t++){
+    const l=lists[t]; if(!l.length) continue;
+    const m=new THREE.InstancedMesh(geo,mats[t],l.length/3);
+    for(let i=0;i<l.length;i+=3){
+      dummy.position.set(l[i]+.5,l[i+1]+.5,l[i+2]+.5);
+      dummy.updateMatrix(); m.setMatrixAt(i/3,dummy.matrix);
+    }
+    scene.add(m); meshes.push(m);
+  }
+}
+rebuild();
+
+// Подсветка блока
+const hl=new THREE.LineSegments(
+  new THREE.EdgesGeometry(new THREE.BoxGeometry(1.02,1.02,1.02)),
+  new THREE.LineBasicMaterial({color:0xffffff}));
+hl.visible=false; scene.add(hl);
+
+// ---- Игрок ----
+const pos=new THREE.Vector3();
+let vy=0, onGround=false, yaw=0, pitch=0;
+const cx=W/2|0, cz=D/2|0;
+pos.set(cx+.5, hmap[cx][cz]+2, cz+.5);
+
+// ---- Raycast ----
+function raycast(){
+  const dir=new THREE.Vector3(-Math.sin(yaw)*Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw)*Math.cos(pitch));
+  let prev=null;
+  for(let t=0;t<5;t+=0.04){
+    const x=Math.floor(pos.x+dir.x*t), y=Math.floor(pos.y+1.6+dir.y*t), z=Math.floor(pos.z+dir.z*t);
+    if(get(x,y,z)&&inb(x,y,z)) return {hit:[x,y,z],prev};
+    prev=[x,y,z];
+  }
+  return null;
+}
+
+function collides(){
+  for(let dx of[-0.3,0.3]) for(let dz of[-0.3,0.3])
+    for(let dy of[0,0.9,1.79])
+      if(get(Math.floor(pos.x+dx),Math.floor(pos.y+dy),Math.floor(pos.z+dz))) return true;
+  return false;
+}
+
+// ---- Хотбар UI ----
+let sel=1;
+const hb=document.getElementById('hotbar');
+BLOCKS.slice(1).forEach((b,i)=>{
+  const d=document.createElement('div');
+  d.className='slot'+(i===0?' active':'');
+  d.style.background=`rgb(${b.c.join(',')})`;
+  d.textContent=b.name;
+  d.ontouchstart=()=>select(i+1);
+  hb.appendChild(d);
+});
+function select(n){
+  sel=n;
+  [...hb.children].forEach((d,i)=>d.classList.toggle('active',i===n-1));
+}
+
+// ---- Джойстик ----
+const joyZone=document.getElementById('joy-zone');
+const joyDot=document.getElementById('joy-dot');
+const jBg=document.getElementById('joy-bg');
+const jRect=()=>jBg.getBoundingClientRect();
+let jx=0,jy=0,jActive=false,jId=-1;
+
+joyZone.addEventListener('touchstart',e=>{
+  const t=[...e.changedTouches].find(t=>t.clientX<180);
+  if(!t) return;
+  jId=t.identifier; jActive=true;
+  updateJoy(t);
+},{passive:true});
+joyZone.addEventListener('touchmove',e=>{
+  const t=[...e.changedTouches].find(t=>t.identifier===jId);
+  if(t) updateJoy(t);
+},{passive:true});
+joyZone.addEventListener('touchend',e=>{
+  if([...e.changedTouches].find(t=>t.identifier===jId)){
+    jx=jy=0; jActive=false; jId=-1;
+    joyDot.style.left='40px'; joyDot.style.bottom='40px';
+  }
+},{passive:true});
+
+function updateJoy(t){
+  const r=jRect();
+  const cx2=r.left+r.width/2, cy2=r.top+r.height/2;
+  let dx=t.clientX-cx2, dy=-(t.clientY-cy2);
+  const len=Math.sqrt(dx*dx+dy*dy), max=48;
+  if(len>max){dx=dx/len*max;dy=dy/len*max;}
+  jx=dx/max; jy=dy/max;
+  joyDot.style.left=(40+dx)+'px';
+  joyDot.style.bottom=(40+dy)+'px';
+}
+
+// ---- Камера (свайп правой стороны) ----
+const lz=document.getElementById('look-zone');
+let lx0=0,ly0=0,lId=-1;
+lz.addEventListener('touchstart',e=>{
+  const t=e.changedTouches[0]; lId=t.identifier; lx0=t.clientX; ly0=t.clientY;
+},{passive:true});
+lz.addEventListener('touchmove',e=>{
+  const t=[...e.changedTouches].find(t=>t.identifier===lId);
+  if(!t) return;
+  yaw+=(t.clientX-lx0)*0.005;
+  pitch=Math.max(-1.4,Math.min(1.4,pitch-(t.clientY-ly0)*0.005));
+  lx0=t.clientX; ly0=t.clientY;
+},{passive:true});
+
+// ---- Прыжок ----
+document.getElementById('jump').addEventListener('touchstart',e=>{
+  if(onGround){vy=8; onGround=false;}
+  e.preventDefault();
+},{passive:false});
+
+// ---- Ломать / Ставить ----
+document.getElementById('break-btn').addEventListener('touchstart',e=>{
+  const r=raycast(); if(!r) return;
+  const [x,y,z]=r.hit;
+  if(y>0){set(x,y,z,0);rebuild();}
+  e.preventDefault();
+},{passive:false});
+
+document.getElementById('place-btn').addEventListener('touchstart',e=>{
+  const r=raycast(); if(!r||!r.prev) return;
+  const [x,y,z]=r.prev;
+  if(inb(x,y,z)&&!get(x,y,z)){
+    set(x,y,z,sel);
+    if(collides()) set(x,y,z,0);
+    else rebuild();
+  }
+  e.preventDefault();
+},{passive:false});
+
+// ---- Игровой цикл ----
+const fwd=new THREE.Vector3(), right2=new THREE.Vector3(), up=new THREE.Vector3(0,1,0);
+let last=performance.now();
+
+function loop(){
+  requestAnimationFrame(loop);
+  const now=performance.now(), dt=Math.min((now-last)/1000,0.04); last=now;
+
+  // Движение
+  fwd.set(-Math.sin(yaw),0,-Math.cos(yaw)).normalize();
+  right2.crossVectors(fwd,up).normalize();
+  const speed=5;
+  const mx=(fwd.x*jy+right2.x*jx)*speed*dt;
+  const mz=(fwd.z*jy+right2.z*jx)*speed*dt;
+
+  pos.x+=mx; if(collides()) pos.x-=mx;
+  pos.z+=mz; if(collides()) pos.z-=mz;
+
+  vy=Math.max(vy-24*dt,-20);
+  const dy=vy*dt;
+  pos.y+=dy;
+  if(collides()){pos.y-=dy; onGround=vy<0; vy=0;}
+  else onGround=false;
+
+  if(pos.y<-10) pos.set(cx+.5,hmap[cx][cz]+3,cz+.5);
+
+  // Камера
+  camera.position.set(pos.x,pos.y+1.6,pos.z);
+  camera.rotation.order='YXZ';
+  camera.rotation.y=yaw;
+  camera.rotation.x=pitch;
+
+  // Подсветка
+  const r=raycast();
+  if(r&&inb(...r.hit)){hl.visible=true;hl.position.set(r.hit[0]+.5,r.hit[1]+.5,r.hit[2]+.5);}
+  else hl.visible=false;
+
+  renderer.render(scene,camera);
+}
+loop();
+
+window.addEventListener('resize',()=>{
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+});
+</script>
+</body>
+</html>
